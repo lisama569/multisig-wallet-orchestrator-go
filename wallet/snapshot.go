@@ -10,6 +10,7 @@ type snapshot struct {
 		Policy     Policy           `json:"policy"`
 		NextNonce  int64            `json:"next_nonce"`
 		UsedNonces map[int64]string `json:"used_nonces"`
+		UsedSeqs   map[int64]string `json:"used_seqs"`
 	} `json:"wallets"`
 	Txs    map[string]*Transaction `json:"txs"`
 	ByIdem map[string]string       `json:"by_idem"`
@@ -26,6 +27,7 @@ func (o *Orchestrator) Snapshot() ([]byte, error) {
 			Policy     Policy           `json:"policy"`
 			NextNonce  int64            `json:"next_nonce"`
 			UsedNonces map[int64]string `json:"used_nonces"`
+			UsedSeqs   map[int64]string `json:"used_seqs"`
 		}, len(o.wallets)),
 		Txs:    make(map[string]*Transaction, len(o.txs)),
 		ByIdem: make(map[string]string, len(o.byIdem)),
@@ -39,11 +41,16 @@ func (o *Orchestrator) Snapshot() ([]byte, error) {
 		for n, t := range w.usedNonces {
 			used[n] = t
 		}
+		seqs := make(map[int64]string, len(w.usedSeqs))
+		for n, t := range w.usedSeqs {
+			seqs[n] = t
+		}
 		s.Wallets[id] = struct {
 			Policy     Policy           `json:"policy"`
 			NextNonce  int64            `json:"next_nonce"`
 			UsedNonces map[int64]string `json:"used_nonces"`
-		}{Policy: w.policy, NextNonce: w.nextNonce, UsedNonces: used}
+			UsedSeqs   map[int64]string `json:"used_seqs"`
+		}{Policy: w.policy, NextNonce: w.nextNonce, UsedNonces: used, UsedSeqs: seqs}
 	}
 	for id, tx := range o.txs {
 		s.Txs[id] = clone(tx)
@@ -65,9 +72,17 @@ func Restore(data []byte) (*Orchestrator, error) {
 		o.ledger.balances[k] = v
 	}
 	for id, w := range s.Wallets {
-		o.wallets[id] = &walletState{policy: w.Policy, nextNonce: w.NextNonce, usedNonces: w.UsedNonces}
+		o.wallets[id] = &walletState{
+			policy:     w.Policy,
+			nextNonce:  w.NextNonce,
+			usedNonces: w.UsedNonces,
+			usedSeqs:   w.UsedSeqs,
+		}
 		if o.wallets[id].usedNonces == nil {
 			o.wallets[id].usedNonces = make(map[int64]string)
+		}
+		if o.wallets[id].usedSeqs == nil {
+			o.wallets[id].usedSeqs = make(map[int64]string)
 		}
 	}
 	o.txs = s.Txs

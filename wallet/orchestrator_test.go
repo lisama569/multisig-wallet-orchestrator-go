@@ -194,7 +194,7 @@ func TestConcurrentProposeSameKey(t *testing.T) {
 	t.Logf("input: %d concurrent proposes idemKey=same-key; all got id=%s", n, ids[0])
 }
 
-func TestExecuteFailureConsumesNonceAndReplaySafe(t *testing.T) {
+func TestExecuteFailureRetryableThenAbandonConsumesNonce(t *testing.T) {
 	o := newTestOrchestrator(t, 100) // 余额只有 100
 	tx1 := mustProposeApprove(t, o, "key-1", 80)
 	tx2 := mustProposeApprove(t, o, "key-2", 50)
@@ -209,44 +209,58 @@ func TestExecuteFailureConsumesNonceAndReplaySafe(t *testing.T) {
 	if _, err := o.Execute(tx1.ID); err != nil {
 		t.Fatalf("Execute tx1: %v", err)
 	}
-	// tx2 余额不足：进入 FAILED，nonce 已消耗，不部分扣款。
+	// tx2 余额不足：进入 RETRYABLE（可补做），不留半截账。
 	_, err := o.Execute(tx2.ID)
 	t.Logf("input: execute tx2 amount=50 balance=20; err=%v", err)
 	if !errors.Is(err, ErrInsufficientFunds) {
 		t.Fatalf("want ErrInsufficientFunds, got %v", err)
 	}
 	got2, _ := o.GetTx(tx2.ID)
-	if got2.Status != StatusFailed {
-		t.Fatalf("tx2 status=%s, want FAILED", got2.Status)
+	if got2.Status != StatusRetryable || !got2.Retryable() {
+		t.Fatalf("tx2 status=%s retryable=%v, want RETRYABLE", got2.Status, got2.Retryable())
+	}
+	if got2.FailKind != ErrInsufficientFunds.Error() {
+		t.Fatalf("tx2 failKind=%q, want %q", got2.FailKind, ErrInsufficientFunds.Error())
 	}
 	if bal := o.ledger.Balance("w1"); bal != 20 {
 		t.Fatalf("wallet balance=%d, want 20 (no partial debit)", bal)
 	}
 
-	// 失败重放：再次 Execute 不得重复扣款、状态不倒退。
+	// 余额未补时重放：仍是 RETRYABLE、同一类原因，且不扣款、不重复累计半截账。
 	replay, err := o.Execute(tx2.ID)
-	t.Logf("replay Execute(%s) on FAILED: status=%s err=%v", tx2.ID, replay.Status, err)
-	if err != nil || replay.Status != StatusFailed {
-		t.Fatalf("replay on FAILED: status=%s err=%v", replay.Status, err)
+	t.Logf("retry Execute(%s) still broke: status=%s retries=%d err=%v", tx2.ID, replay.Status, replay.Retries, err)
+	if !errors.Is(err, ErrInsufficientFunds) || replay.Status != StatusRetryable {
+		t.Fatalf("retry while broke: status=%s err=%v", replay.Status, err)
 	}
-	// 成功交易重放同样幂等。
+	if bal := o.ledger.Balance("w1"); bal != 20 {
+		t.Fatalf("after failed retry balance=%d, want 20", bal)
+	}
+
+	// 成功交易重放幂等：不重复扣款。
 	replay1, err := o.Execute(tx1.ID)
 	if err != nil || replay1.Status != StatusExecuted {
 		t.Fatalf("replay on EXECUTED: status=%s err=%v", replay1.Status, err)
 	}
-	if bal := o.ledger.Balance("w1"); bal != 20 {
-		t.Fatalf("after replays balance=%d, want 20 (no double charge)", bal)
-	}
 
-	// 失败交易的 nonce 已被消耗，后续交易使用下一个 nonce。
+	// 放弃补做 -> FAILED 终态；nonce 已消耗，后续交易使用下一个 nonce。
+	ab, err := o.Abandon(tx2.ID)
+	if err != nil || ab.Status != StatusFailed {
+		t.Fatalf("Abandon: status=%s err=%v", ab.Status, err)
+	}
+	if _, err := o.Execute(tx2.ID); !errors.Is(err, ErrNotRetryable) {
+		t.Fatalf("execute on FAILED want ErrNotRetryable, got %v", err)
+	}
 	tx3 := mustProposeApprove(t, o, "key-3", 10)
 	tx3, err = o.Submit(tx3.ID)
 	if err != nil {
 		t.Fatalf("Submit tx3: %v", err)
 	}
-	t.Logf("tx1 nonce=0 tx2(failed) nonce=1 -> tx3 nonce=%d", tx3.Nonce)
+	t.Logf("tx1 nonce=0 tx2(abandoned) nonce=1 -> tx3 nonce=%d; w1 balance=%d", tx3.Nonce, o.ledger.Balance("w1"))
 	if tx3.Nonce != 2 {
-		t.Fatalf("tx3 nonce=%d, want 2 (failed tx consumed nonce 1)", tx3.Nonce)
+		t.Fatalf("tx3 nonce=%d, want 2 (abandoned tx consumed nonce 1)", tx3.Nonce)
+	}
+	if bal := o.ledger.Balance("w1"); bal != 20 {
+		t.Fatalf("final balance=%d, want 20 (abandon never charges)", bal)
 	}
 }
 
