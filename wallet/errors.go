@@ -14,4 +14,7 @@ var (
 	ErrInsufficientFunds  = errors.New("insufficient funds")       // 余额不足
 	ErrInvalidPolicy      = errors.New("invalid policy")           // 策略本身不合法
 	ErrInvalidAmount      = errors.New("invalid amount")           // 金额不合法
+	ErrInvalidSeq         = errors.New("invalid exec sequence")    // 执行序号不合法（<=0）
+	ErrSeqOccupied        = errors.New("exec sequence occupied")   // 同钱包内执行序号已被先到的交易占用
+	ErrSeqAhead           = errors.New("earlier exec sequence pending") // 更小执行序号的交易尚未落终态，需等待
 )

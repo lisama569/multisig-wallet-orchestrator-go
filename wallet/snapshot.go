@@ -10,13 +10,15 @@ type snapshot struct {
 		Policy     Policy           `json:"policy"`
 		NextNonce  int64            `json:"next_nonce"`
 		UsedNonces map[int64]string `json:"used_nonces"`
+		Seqs       map[int64]string `json:"seqs"`
 	} `json:"wallets"`
-	Txs    map[string]*Transaction `json:"txs"`
-	ByIdem map[string]string       `json:"by_idem"`
-	TxSeq  int64                   `json:"tx_seq"`
+	Txs     map[string]*Transaction `json:"txs"`
+	ByIdem  map[string]string       `json:"by_idem"`
+	TxSeq   int64                   `json:"tx_seq"`
+	Journal []JournalEntry          `json:"journal"`
 }
 
-// Snapshot 导出当前全部状态（账本 + 交易 + nonce 游标）。
+// Snapshot 导出当前全部状态（账本 + 交易 + nonce 游标 + 执行序号索引 + 落账流水）。
 func (o *Orchestrator) Snapshot() ([]byte, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -26,10 +28,12 @@ func (o *Orchestrator) Snapshot() ([]byte, error) {
 			Policy     Policy           `json:"policy"`
 			NextNonce  int64            `json:"next_nonce"`
 			UsedNonces map[int64]string `json:"used_nonces"`
+			Seqs       map[int64]string `json:"seqs"`
 		}, len(o.wallets)),
-		Txs:    make(map[string]*Transaction, len(o.txs)),
-		ByIdem: make(map[string]string, len(o.byIdem)),
-		TxSeq:  o.txSeq,
+		Txs:     make(map[string]*Transaction, len(o.txs)),
+		ByIdem:  make(map[string]string, len(o.byIdem)),
+		TxSeq:   o.txSeq,
+		Journal: append([]JournalEntry(nil), o.ledger.journal...),
 	}
 	for k, v := range o.ledger.balances {
 		s.Balances[k] = v
@@ -39,11 +43,16 @@ func (o *Orchestrator) Snapshot() ([]byte, error) {
 		for n, t := range w.usedNonces {
 			used[n] = t
 		}
+		seqs := make(map[int64]string, len(w.seqs))
+		for n, t := range w.seqs {
+			seqs[n] = t
+		}
 		s.Wallets[id] = struct {
 			Policy     Policy           `json:"policy"`
 			NextNonce  int64            `json:"next_nonce"`
 			UsedNonces map[int64]string `json:"used_nonces"`
-		}{Policy: w.policy, NextNonce: w.nextNonce, UsedNonces: used}
+			Seqs       map[int64]string `json:"seqs"`
+		}{Policy: w.policy, NextNonce: w.nextNonce, UsedNonces: used, Seqs: seqs}
 	}
 	for id, tx := range o.txs {
 		s.Txs[id] = clone(tx)
@@ -54,7 +63,8 @@ func (o *Orchestrator) Snapshot() ([]byte, error) {
 	return json.Marshal(s)
 }
 
-// Restore 用快照重建一个编排器；恢复后重放请求与原实例结论一致。
+// Restore 用快照重建一个编排器；恢复后重放请求与原实例结论一致，
+// RETRYABLE 的有序交易也可在恢复后继续补做。
 func Restore(data []byte) (*Orchestrator, error) {
 	var s snapshot
 	if err := json.Unmarshal(data, &s); err != nil {
@@ -64,14 +74,29 @@ func Restore(data []byte) (*Orchestrator, error) {
 	for k, v := range s.Balances {
 		o.ledger.balances[k] = v
 	}
+	o.ledger.journal = append([]JournalEntry(nil), s.Journal...)
 	for id, w := range s.Wallets {
-		o.wallets[id] = &walletState{policy: w.Policy, nextNonce: w.NextNonce, usedNonces: w.UsedNonces}
+		o.wallets[id] = &walletState{
+			policy:     w.Policy,
+			nextNonce:  w.NextNonce,
+			usedNonces: w.UsedNonces,
+			seqs:       w.Seqs,
+		}
 		if o.wallets[id].usedNonces == nil {
 			o.wallets[id].usedNonces = make(map[int64]string)
 		}
+		if o.wallets[id].seqs == nil {
+			o.wallets[id].seqs = make(map[int64]string)
+		}
 	}
 	o.txs = s.Txs
+	if o.txs == nil {
+		o.txs = make(map[string]*Transaction)
+	}
 	o.byIdem = s.ByIdem
+	if o.byIdem == nil {
+		o.byIdem = make(map[string]string)
+	}
 	o.txSeq = s.TxSeq
 	return o, nil
 }
